@@ -310,6 +310,8 @@ class Hub75:
                             g = color[1]
                             b = color[2]
                             self.set_pixel(x+xx,y+yy+bit,r,g,b)
+                    else:
+                        self.set_pixel(x+xx,y+yy+bit,0,0,0)
                         
             xx=xx+1 # space between characters
 
