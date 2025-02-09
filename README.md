@@ -9,7 +9,9 @@ Usage:
 
 
 import time
+
 from hub75 import Hub75
+
 import random
 
 Create an instance of the Hub75 display.
