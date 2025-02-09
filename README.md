@@ -33,3 +33,5 @@ display.draw_text(15,41,"font_8x5","12:22:34",1,1,1,1) # x,y,font to use,text to
 Simulated clock example using the main functions (I'm attaching an RTC module to GPIO 0 and 1)
 
 ![Don't Judge Me](https://github.com/andycrook/Hub75/blob/main/hub75_image.jpg?raw=true))
+
+![Text Wrapping](https://github.com/andycrook/Hub75/blob/main/hub75_image_2.jpg?raw=true))
