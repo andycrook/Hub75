@@ -122,23 +122,33 @@ class Hub75:
         # Create two buffers for double buffering.
         self.buffer1 = array.array("I", [0] * self.buf_size)
         self.buffer2 = array.array("I", [0] * self.buf_size)
-        self.draw_buffer = self.buffer1   # draw_buffer is where set_pixel writes
+        self.buffer3 = array.array("I", [0] * self.buf_size)
+
+        self.draw_buffer = self.buffer1   # draw_buffer is a completed buffer frame sits
         self.frame_buffer = self.buffer2  # frame_buffer is what the refresh thread sends out
+        self.back_buffer = self.buffer3   # back_buffer is where active drawing takes place
+        
+        # uPython is too slow to keep up with the display, but copying one buffer to another is
+        # fast. So:
+        #
+        # clear the back_buffer frame and draw everything there
+        # the refresh routine copies from draw buffer to frame buffer to output PIO
+        # when drawn, back_buffer is copied to draw_buffer fast
+
 
         # Set up the PIO State Machines:
         self.sm_data = rp2.StateMachine(0, data_hub75,
                                         out_base=Pin(data_pin_start),
                                         sideset_base=Pin(clock_pin),
-                                        freq=60_000_000)
+                                        freq=20_000_000)
         self.sm_row = rp2.StateMachine(1, row_hub75,
                                        out_base=Pin(row_pin_start),
                                        sideset_base=Pin(latch_pin_start),
-                                       freq=60_000_000)
-
+                                       freq=20_000_000)
+        self.clearing = False
         self.sm_data.active(1)
         self.sm_row.active(1)
-        #print("SETTING UP HUB75...")
-        # Flag to control the refresh thread
+       
         self.running = True
         _thread.start_new_thread(self._refresh, ())
 
@@ -146,7 +156,7 @@ class Hub75:
         """
         Continuously send the frame_buffer data to the display.
         Each iteration sends one “row” (a pair of physical scanlines).
-        After sending all rows, swap the frame and draw buffers.
+        After sending all rows, refresh the frame buffer from the draw buffer.
         """
         
         row_index = 0
@@ -158,14 +168,17 @@ class Hub75:
             base = row_index * self.blocks_per_row
             for i in range(self.blocks_per_row):
                 val = self.frame_buffer[base + i]
+       
                 self.sm_data.put(val)
 
             row_index += 1
             if row_index >= self.num_rows:
                 row_index = 0
-                # copy back buffer to frame
-                self.frame_buffer= self.draw_buffer
+                # copy draw buffer to frame
                 
+                self.frame_buffer= self.draw_buffer
+            
+               
                 
         
     def set_pixel(self, x, y, r, g, b):
@@ -201,9 +214,8 @@ class Hub75:
         # Prepare mask to update only the 3 bits for this pixel.
         mask = 0b111 << bit_offset
         # Clear previous value and set the new color.
-        self.draw_buffer[index] = (self.draw_buffer[index] & ~mask) | (color << bit_offset)
-
-
+        self.back_buffer[index] = (self.back_buffer[index] & ~mask) | (color << bit_offset)
+        
 
     def draw_box(self,x,y,w,h,filled,r,g,b):
         if filled==0:
@@ -219,30 +231,29 @@ class Hub75:
                 for j in range(y,y+h):
                     self.set_pixel(i,j,r,g,b)
 
-    def draw_line(self,x1,y1,x2,y2,r,g,b):
-        x,y = x1,y1
+    def draw_line(self,x1, y1, x2, y2, r, g, b):
         dx = abs(x2 - x1)
-        dy = abs(y2 -y1)
-        gradient = dy/float(dx)
+        dy = abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        err = dx - dy
 
-        if gradient > 1:
-            dx, dy = dy, dx
-            x, y = y, x
-            x1, y1 = y1, x1
-            x2, y2 = y2, x2
+        while True:
+            # Set the pixel at (x1, y1)
+            self.set_pixel(x1, y1, r, g, b)
 
-        p = 2*dy - dx
+            # Check if we have reached the endpoint
+            if x1 == x2 and y1 == y2:
+                break
 
-        for k in range(2, dx + 2):
-            if p > 0:
-                y = y + 1 if y < y2 else y - 1
-                p = p + 2 * (dy - dx)
-            else:
-                p = p + 2 * dy
+            e2 = err * 2
+            if e2 > -dy:
+                err -= dy
+                x1 += sx
+            if e2 < dx:
+                err += dx
+                y1 += sy
 
-            x = x + 1 if x < x2 else x - 1
-
-            self.set_pixel(x,y,r,g,b)
 
 
     def draw_circle(self,x0,y0,radius,r,g,b):
@@ -275,14 +286,21 @@ class Hub75:
         return col
       
     def draw_text(self,x,y,font_name,char,r,g,b, *args):
-
+        color_trigger=0
+        add_r=0
+        add_g=0
+        add_b=0
         if not args:
-            col_over = 0
+            col_over = 0 # rainbow
+            col_add = 0    # no black pixels, just overlay text
         else:
             col_over= args[0]
+            col_add = 0
+            if len(args)>1:
+                col_add = args[1]
         xx=0
         yy=0
-        for ch in char:
+        for i, ch in enumerate(char):
             try:
                 char_data = getattr(FONT,font_name)[ch]
             except:
@@ -310,20 +328,69 @@ class Hub75:
                             g = color[1]
                             b = color[2]
                             self.set_pixel(x+xx,y+yy+bit,r,g,b)
+                        if col_over==2:
+                            if color_trigger==0:
+                                color = self.rand_color()  # get a random rgb for the pixel
+                                r = color[0]
+                                g = color[1]
+                                b = color[2]
+                                color_trigger=1
+                            self.set_pixel(x+xx,y+yy+bit,r,g,b)
                     else:
-                        self.set_pixel(x+xx,y+yy+bit,0,0,0)
-                        
-            xx=xx+1 # space between characters
+                        if col_add ==0:
+                            self.set_pixel(x+xx,y+yy+bit,0,0,0)
+                            add_r = 0
+                            add_g = 0
+                            add_b = 0
+                        if col_add ==2:
+                            self.set_pixel(x+xx,y+yy+bit,1,0,0)
+                            add_r = 1
+                            add_g = 0
+                            add_b = 0
+                        if col_add ==3:
+                            self.set_pixel(x+xx,y+yy+bit,0,1,0)
+                            add_r = 0
+                            add_g = 1
+                            add_b = 0
+                        if col_add ==4:
+                            self.set_pixel(x+xx,y+yy+bit,0,0,1)
+                            add_r = 0
+                            add_b = 0
+                            add_b= 1
+                        if col_add ==5:
+                            self.set_pixel(x+xx,y+yy+bit,1,1,0)
+                            add_r = 1
+                            add_g = 1
+                            add_b = 0
+                        if col_add ==6:
+                            self.set_pixel(x+xx,y+yy+bit,1,0,1)
+                            add_r = 1
+                            add_g = 0
+                            add_b = 1
+                        if col_add ==7:
+                            self.set_pixel(x+xx,y+yy+bit,0,1,1)
+                            add_r = 0
+                            add_g = 1
+                            add_b = 1
+                        if col_add ==8:
+                            self.set_pixel(x+xx,y+yy+bit,1,1,1)
+                            add_r = 1
+                            add_g = 1
+                            add_b = 1
+            if i < len(char) - 1:
+                xx=xx+1 # space between characters
+                for b in range(0,8):
+                    if col_add != 1:   # draw as a color
+                        self.set_pixel(x+xx,y+yy+b,add_r,add_g,add_b)
 
+    def copy_back_buffer(self):
+        self.draw_buffer= self.back_buffer
                     
     def clear(self):
-        """
-        Clear the drawing buffer (set all pixels to off).
-        """
-        for i in range(self.buf_size):
-            self.draw_buffer[i] = 0
-                    
-                    
+        self.back_buffer = array.array('I', [0] * self.buf_size)
+ 
+            
+            
     def stop(self):
         """
         Stop the refresh thread and disable the state machines.
@@ -331,3 +398,4 @@ class Hub75:
         self.running = False
         self.sm_data.active(0)
         self.sm_row.active(0)
+
